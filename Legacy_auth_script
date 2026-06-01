@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+import argparse
+import csv
+import json
+import socket
+import ssl
+import imaplib
+import poplib
+import smtplib
+import requests
+from datetime import datetime, timezone
+from getpass import getpass
+
+TIMEOUT = 15
+
+TESTS = []
+
+
+def result(protocol, status, detail):
+    entry = {
+        "time": datetime.now(timezone.utc).isoformat(),
+        "protocol": protocol,
+        "status": status,
+        "detail": str(detail)[:500]
+    }
+    TESTS.append(entry)
+    print(f"[{status}] {protocol} -> {detail}")
+
+
+def test_imap(user, password):
+    try:
+        conn = imaplib.IMAP4_SSL("outlook.office365.com", 993, timeout=TIMEOUT)
+        conn.login(user, password)
+        result("IMAP", "ALLOWED", "Login successful")
+        conn.logout()
+    except Exception as e:
+        result("IMAP", "BLOCKED_OR_FAILED", e)
+
+
+def test_pop3(user, password):
+    try:
+        conn = poplib.POP3_SSL("outlook.office365.com", 995, timeout=TIMEOUT)
+        conn.user(user)
+        conn.pass_(password)
+        result("POP3", "ALLOWED", "Login successful")
+        conn.quit()
+    except Exception as e:
+        result("POP3", "BLOCKED_OR_FAILED", e)
+
+
+def test_smtp(user, password):
+    try:
+        conn = smtplib.SMTP("smtp.office365.com", 587, timeout=TIMEOUT)
+        conn.ehlo()
+        conn.starttls()
+        conn.ehlo()
+        conn.login(user, password)
+        result("SMTP AUTH", "ALLOWED", "Login successful")
+        conn.quit()
+    except Exception as e:
+        result("SMTP AUTH", "BLOCKED_OR_FAILED", e)
+
+
+def test_basic_http(name, url, user, password):
+    try:
+        r = requests.get(
+            url,
+            auth=(user, password),
+            timeout=TIMEOUT,
+            headers={"User-Agent": "LegacyAuthAudit/1.0"}
+        )
+
+        if r.status_code in [200, 201, 202, 207]:
+            result(name, "ALLOWED", f"HTTP {r.status_code}")
+        elif r.status_code in [401, 403]:
+            result(name, "BLOCKED_OR_FAILED", f"HTTP {r.status_code}")
+        else:
+            result(name, "UNKNOWN", f"HTTP {r.status_code}")
+
+    except Exception as e:
+        result(name, "BLOCKED_OR_FAILED", e)
+
+
+def export_json(path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(TESTS, f, indent=2, ensure_ascii=False)
+
+
+def export_csv(path):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["time", "protocol", "status", "detail"])
+        writer.writeheader()
+        writer.writerows(TESTS)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="External Microsoft 365 Legacy Auth audit - single authorized test account only"
+    )
+
+    parser.add_argument("-u", "--user", required=True, help="Test account UPN")
+    parser.add_argument("--json", default="legacy_auth_results.json")
+    parser.add_argument("--csv", default="legacy_auth_results.csv")
+    args = parser.parse_args()
+
+    print("\n=== Microsoft 365 Legacy Auth External Audit ===")
+    print("[!] Use ONLY a dedicated authorized test account.")
+    print("[!] This script does NOT spray passwords or enumerate users.\n")
+
+    password = getpass("Password: ")
+
+    test_imap(args.user, password)
+    test_pop3(args.user, password)
+    test_smtp(args.user, password)
+
+    test_basic_http(
+        "EWS Basic Auth",
+        "https://outlook.office365.com/EWS/Exchange.asmx",
+        args.user,
+        password
+    )
+
+    test_basic_http(
+        "Autodiscover Basic Auth",
+        "https://autodiscover-s.outlook.com/autodiscover/autodiscover.xml",
+        args.user,
+        password
+    )
+
+    export_json(args.json)
+    export_csv(args.csv)
+
+    print("\n=== Summary ===")
+    allowed = [x for x in TESTS if x["status"] == "ALLOWED"]
+
+    if allowed:
+        print("[!] Legacy Auth semble encore autorisée sur :")
+        for x in allowed:
+            print(f"    - {x['protocol']}")
+    else:
+        print("[+] Aucun login Legacy réussi détecté.")
+
+    print(f"\nRésultats exportés : {args.json} / {args.csv}")
+
+
+if __name__ == "__main__":
+    main()
